@@ -11,14 +11,12 @@ SYNC_FOLDERS=(
     "$HOME/dev/ChatGPT-Next-Web2"
 )
 
-# ── Patterns to exclude from sync (add more as needed) ──
-EXCLUDES=(
-    ".next"
-    "node_modules"
-    ".git"
-    ".yarn"
-    ".env.local"
-)
+# ── Per-folder exclude patterns ──
+# Use the folder path as key (must match SYNC_FOLDERS entries after expansion).
+# Separate patterns with spaces.
+declare -A FOLDER_EXCLUDES
+FOLDER_EXCLUDES["$HOME/dev/autosync"]=""
+FOLDER_EXCLUDES["$HOME/dev/ChatGPT-Next-Web2"]=".next node_modules .git .yarn .env.local"
 
 # ── Settings ──
 POLL_INTERVAL=60          # seconds between full syncs (catches remote-side changes)
@@ -36,9 +34,10 @@ sync_all() {
     for folder in "${SYNC_FOLDERS[@]}"; do
         local remote_path="${folder/#$HOME/\/home\/$REMOTE_USER}"
         log "Syncing $folder ↔ $REMOTE_HOST:$remote_path"
-        # Build ignore args from EXCLUDES
+        # Build ignore args from per-folder excludes
         local ignore_args=()
-        for pattern in "${EXCLUDES[@]}"; do
+        local excludes="${FOLDER_EXCLUDES[$folder]}"
+        for pattern in $excludes; do
             ignore_args+=(-ignore "Name $pattern")
         done
 
@@ -72,16 +71,22 @@ for folder in "${SYNC_FOLDERS[@]}"; do
     WATCH_PATHS+=("$folder")
 done
 
-# Build inotifywait exclude regex from EXCLUDES
+# Build inotifywait exclude regex from all per-folder excludes
+declare -A _seen_patterns
 INOTIFY_EXCLUDE=""
-for pattern in "${EXCLUDES[@]}"; do
-    if [ -z "$INOTIFY_EXCLUDE" ]; then
-        INOTIFY_EXCLUDE="/(${pattern}"
-    else
-        INOTIFY_EXCLUDE="${INOTIFY_EXCLUDE}|${pattern}"
-    fi
+for folder in "${SYNC_FOLDERS[@]}"; do
+    for pattern in ${FOLDER_EXCLUDES[$folder]}; do
+        [ -n "${_seen_patterns[$pattern]}" ] && continue
+        _seen_patterns[$pattern]=1
+        if [ -z "$INOTIFY_EXCLUDE" ]; then
+            INOTIFY_EXCLUDE="/(${pattern}"
+        else
+            INOTIFY_EXCLUDE="${INOTIFY_EXCLUDE}|${pattern}"
+        fi
+    done
 done
 [ -n "$INOTIFY_EXCLUDE" ] && INOTIFY_EXCLUDE="${INOTIFY_EXCLUDE})/"
+unset _seen_patterns
 
 log "Watching ${WATCH_PATHS[*]} for changes (poll every ${POLL_INTERVAL}s)"
 [ -n "$INOTIFY_EXCLUDE" ] && log "Excluding pattern: $INOTIFY_EXCLUDE"
