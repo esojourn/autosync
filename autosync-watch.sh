@@ -9,14 +9,22 @@ REMOTE_HOST="DXOffice2021"
 SYNC_FOLDERS=(
     "$HOME/dev/autosync"
     "$HOME/dev/ChatGPT-Next-Web2"
+    "$HOME/dev/sk-add-ip"
 )
 
-# ── Per-folder exclude patterns ──
+# ── Global exclude patterns (applied to all folders) ──
+GLOBAL_EXCLUDES=(
+    .git node_modules .next __pycache__ .venv venv
+    .env .cache .tox "*.pyc" .DS_Store .yarn
+)
+
+# ── Per-folder exclude patterns (in addition to globals) ──
 # Use the folder path as key (must match SYNC_FOLDERS entries after expansion).
 # Separate patterns with spaces.
 declare -A FOLDER_EXCLUDES
 FOLDER_EXCLUDES["$HOME/dev/autosync"]=""
-FOLDER_EXCLUDES["$HOME/dev/ChatGPT-Next-Web2"]=".next node_modules .git .yarn .env.local"
+FOLDER_EXCLUDES["$HOME/dev/ChatGPT-Next-Web2"]=".env.local"
+FOLDER_EXCLUDES["$HOME/dev/sk-add-ip"]=""
 
 # ── Settings ──
 POLL_INTERVAL=60          # seconds between full syncs (catches remote-side changes)
@@ -33,9 +41,14 @@ log() {
 sync_all() {
     for folder in "${SYNC_FOLDERS[@]}"; do
         local remote_path="${folder/#$HOME/\/home\/$REMOTE_USER}"
+        # Ensure remote directory exists
+        ssh -o ConnectTimeout=10 "$REMOTE_USER@$REMOTE_HOST" "mkdir -p '$remote_path'" 2>/dev/null
         log "Syncing $folder ↔ $REMOTE_HOST:$remote_path"
-        # Build ignore args from per-folder excludes
+        # Build ignore args from global + per-folder excludes
         local ignore_args=()
+        for pattern in "${GLOBAL_EXCLUDES[@]}"; do
+            ignore_args+=(-ignore "Name $pattern")
+        done
         local excludes="${FOLDER_EXCLUDES[$folder]}"
         for pattern in $excludes; do
             ignore_args+=(-ignore "Name $pattern")
@@ -71,18 +84,22 @@ for folder in "${SYNC_FOLDERS[@]}"; do
     WATCH_PATHS+=("$folder")
 done
 
-# Build inotifywait exclude regex from all per-folder excludes
+# Build inotifywait exclude regex from global + per-folder excludes
 declare -A _seen_patterns
 INOTIFY_EXCLUDE=""
+for pattern in "${GLOBAL_EXCLUDES[@]}" ; do
+    _seen_patterns[$pattern]=1
+    if [ -z "$INOTIFY_EXCLUDE" ]; then
+        INOTIFY_EXCLUDE="/(${pattern}"
+    else
+        INOTIFY_EXCLUDE="${INOTIFY_EXCLUDE}|${pattern}"
+    fi
+done
 for folder in "${SYNC_FOLDERS[@]}"; do
     for pattern in ${FOLDER_EXCLUDES[$folder]}; do
         [ -n "${_seen_patterns[$pattern]}" ] && continue
         _seen_patterns[$pattern]=1
-        if [ -z "$INOTIFY_EXCLUDE" ]; then
-            INOTIFY_EXCLUDE="/(${pattern}"
-        else
-            INOTIFY_EXCLUDE="${INOTIFY_EXCLUDE}|${pattern}"
-        fi
+        INOTIFY_EXCLUDE="${INOTIFY_EXCLUDE}|${pattern}"
     done
 done
 [ -n "$INOTIFY_EXCLUDE" ] && INOTIFY_EXCLUDE="${INOTIFY_EXCLUDE})/"

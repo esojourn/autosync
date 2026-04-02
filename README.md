@@ -41,14 +41,15 @@ SYNC_FOLDERS=(
     "$HOME/dev/ChatGPT-Next-Web2"
 )
 
-# Patterns to exclude from sync
-EXCLUDES=(
-    ".next"
-    "node_modules"
-    ".git"
-    ".yarn"
-    ".env.local"
+# Global exclude patterns (applied to all folders)
+GLOBAL_EXCLUDES=(
+    .git node_modules .next __pycache__ .venv venv
+    .env .cache .tox "*.pyc" .DS_Store .yarn
 )
+
+# Per-folder exclude patterns (in addition to globals)
+declare -A FOLDER_EXCLUDES
+FOLDER_EXCLUDES["$HOME/dev/ChatGPT-Next-Web2"]=".env.local"
 ```
 
 After editing, restart the service:
