@@ -38,41 +38,41 @@ ssh-copy-id user@remote-host
 ssh user@remote-host "unison -version"
 ```
 
-### WSL (Windows host with WSL)
+### WSL (Windows host with Tailscale on Windows)
 
-On the Windows host:
+Routes SSH through Windows Tailscale into WSL, keeping a single tailnet node.
 
-1. **Enable OpenSSH Server** (PowerShell as Admin):
+**In WSL**, install unison:
+
+```bash
+sudo apt install unison
+```
+
+**On Windows** (PowerShell as Admin):
+
+1. **Enable OpenSSH Server:**
    ```powershell
    Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
    Start-Service sshd
    Set-Service -Name sshd -StartupType Automatic
    ```
 
-2. **Install WSL and unison inside it:**
-   ```bash
-   wsl --install  # if not already installed
-   wsl
-   sudo apt install unison
+2. **Set WSL as default shell for your user** — edit `C:\ProgramData\ssh\sshd_config`:
    ```
-
-3. **Configure SSH to use WSL as default shell** — edit `C:\ProgramData\ssh\sshd_config` on Windows:
-   ```
-   # Add or change this line:
-   Subsystem sftp /usr/lib/openssh/sftp-server
-
-   # Set WSL bash as default shell for your user
    Match User eso
        ForceCommand C:\Windows\System32\wsl.exe -e bash -login
    ```
-   Then restart sshd: `Restart-Service sshd` (PowerShell as Admin).
+   Then restart sshd:
+   ```powershell
+   Restart-Service sshd
+   ```
 
-4. **Set up SSH key auth** (run on LOCAL machine):
+3. **Set up SSH key auth** (run on LOCAL machine):
    ```bash
    ssh-copy-id user@remote-host
    ```
 
-5. **Test connection:**
+4. **Test connection** (run on LOCAL machine):
    ```bash
    ssh user@remote-host "unison -version"
    ```
