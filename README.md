@@ -58,28 +58,60 @@ After editing, restart the service:
 systemctl --user restart autosync
 ```
 
-## Service management
+## TUI Monitor
 
-The script runs as a systemd user service (`~/.config/systemd/user/autosync.service`).
+Run the terminal UI to monitor and manage autosync:
 
 ```bash
-# Status
-systemctl --user status autosync
+./autosync-tui.sh
+```
 
-# Start / stop / restart
+### Dashboard (default view)
+
+- Service status: Running / Stopped / Not Installed
+- Per-folder last sync time, result (OK/FAIL), and trigger type
+- Color-coded recent activity log
+
+**Key bindings (adapt to current service state):**
+
+| Key | Action |
+|-----|--------|
+| `i` | Install service (only when not installed) |
+| `u` | Uninstall service (with confirmation) |
+| `s` | Start or Stop service (stop requires confirmation) |
+| `r` | Restart service |
+| `l` | Open log viewer |
+| `q` | Quit |
+
+### Log viewer
+
+Full-screen scrollable view of the complete log file.
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` | Scroll up/down |
+| `g` / `G` | Jump to top/bottom |
+| `Esc` | Back to dashboard |
+
+## Service management (CLI)
+
+The TUI handles service management interactively. You can also use systemctl directly:
+
+```bash
+systemctl --user status autosync
 systemctl --user start autosync
 systemctl --user stop autosync
 systemctl --user restart autosync
-
-# Disable auto-start on boot
-systemctl --user disable autosync
 ```
 
 ## Logs
 
 ```bash
-# Live log
+# Live log in terminal
 tail -f ~/.local/share/autosync/autosync.log
+
+# TUI log viewer (recommended)
+./autosync-tui.sh   # then press l
 ```
 
 ## Files
@@ -87,5 +119,8 @@ tail -f ~/.local/share/autosync/autosync.log
 | File | Location |
 |------|----------|
 | Sync script | `~/dev/autosync/autosync-watch.sh` |
+| TUI monitor | `~/dev/autosync/autosync-tui.sh` |
 | Systemd service | `~/.config/systemd/user/autosync.service` |
 | Log file | `~/.local/share/autosync/autosync.log` |
+| Status file | `~/.local/share/autosync/status` |
+| State file | `~/.local/share/autosync/state` |

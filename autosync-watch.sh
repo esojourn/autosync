@@ -30,6 +30,8 @@ FOLDER_EXCLUDES["$HOME/dev/sk-add-ip"]=""
 POLL_INTERVAL=60          # seconds between full syncs (catches remote-side changes)
 DEBOUNCE=3                # seconds to wait after last local change before syncing
 LOG_FILE="$HOME/.local/share/autosync/autosync.log"
+STATUS_FILE="$HOME/.local/share/autosync/status"
+STATE_FILE="$HOME/.local/share/autosync/state"
 
 mkdir -p "$(dirname "$LOG_FILE")"
 
@@ -37,8 +39,26 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
 }
 
+set_state() {
+    echo "$1|$(date '+%Y-%m-%d %H:%M:%S')" > "$STATE_FILE"
+}
+
+update_status() {
+    local folder="$1" status="$2" trigger="$3"
+    local ts
+    ts=$(date '+%Y-%m-%d %H:%M:%S')
+    # Update or add entry for this folder in the status file
+    if [ -f "$STATUS_FILE" ] && grep -q "^${folder}|" "$STATUS_FILE"; then
+        sed -i "s#^${folder}|.*#${folder}|${status}|${ts}|${trigger}#" "$STATUS_FILE"
+    else
+        echo "${folder}|${status}|${ts}|${trigger}" >> "$STATUS_FILE"
+    fi
+}
+
 # ── Build unison args for each folder ──
 sync_all() {
+    local trigger="${1:-periodic}"
+    set_state "syncing"
     for folder in "${SYNC_FOLDERS[@]}"; do
         local remote_path="${folder/#$HOME/\/home\/$REMOTE_USER}"
         # Ensure remote directory exists
@@ -65,15 +85,18 @@ sync_all() {
             2>&1 | tee -a "$LOG_FILE"
         if [ ${PIPESTATUS[0]} -eq 0 ]; then
             log "Sync OK: $folder"
+            update_status "$folder" "OK" "$trigger"
         else
             log "Sync FAILED: $folder"
+            update_status "$folder" "FAILED" "$trigger"
         fi
     done
+    set_state "watching"
 }
 
 # ── Initial sync ──
 log "=== autosync started ==="
-sync_all
+sync_all "startup"
 
 # ── Watch for local changes + periodic sync for remote changes ──
 LAST_SYNC=$(date +%s)
@@ -85,21 +108,32 @@ for folder in "${SYNC_FOLDERS[@]}"; do
 done
 
 # Build inotifywait exclude regex from global + per-folder excludes
+# Convert glob patterns (used by unison) to regex for inotifywait
+_glob_to_regex() {
+    local p="$1"
+    # Escape regex-special chars, then convert glob * to .*
+    p="${p//\./\\.}"
+    p="${p//\*/.*}"
+    p="${p//\?/.}"
+    echo "$p"
+}
 declare -A _seen_patterns
 INOTIFY_EXCLUDE=""
 for pattern in "${GLOBAL_EXCLUDES[@]}" ; do
     _seen_patterns[$pattern]=1
+    local_re=$(_glob_to_regex "$pattern")
     if [ -z "$INOTIFY_EXCLUDE" ]; then
-        INOTIFY_EXCLUDE="/(${pattern}"
+        INOTIFY_EXCLUDE="/(${local_re}"
     else
-        INOTIFY_EXCLUDE="${INOTIFY_EXCLUDE}|${pattern}"
+        INOTIFY_EXCLUDE="${INOTIFY_EXCLUDE}|${local_re}"
     fi
 done
 for folder in "${SYNC_FOLDERS[@]}"; do
     for pattern in ${FOLDER_EXCLUDES[$folder]}; do
         [ -n "${_seen_patterns[$pattern]}" ] && continue
         _seen_patterns[$pattern]=1
-        INOTIFY_EXCLUDE="${INOTIFY_EXCLUDE}|${pattern}"
+        local_re=$(_glob_to_regex "$pattern")
+        INOTIFY_EXCLUDE="${INOTIFY_EXCLUDE}|${local_re}"
     done
 done
 [ -n "$INOTIFY_EXCLUDE" ] && INOTIFY_EXCLUDE="${INOTIFY_EXCLUDE})/"
@@ -126,12 +160,12 @@ while true; do
         while inotifywait -r -q -t 1 -e modify,create,delete,move ${INOTIFY_EXCLUDE:+--exclude "$INOTIFY_EXCLUDE"} "${WATCH_PATHS[@]}" >/dev/null 2>&1; do
             sleep 1
         done
-        sync_all
+        sync_all "change"
         LAST_SYNC=$NOW
     elif [ $EXIT_CODE -eq 2 ]; then
         # Timeout — periodic sync to catch remote changes
         log "Periodic sync..."
-        sync_all
+        sync_all "periodic"
         LAST_SYNC=$NOW
     fi
 done
