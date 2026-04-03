@@ -131,13 +131,18 @@ draw_dashboard() {
 
     # ── Folder status table ──
     local home_short="~"
-    printf "  ${BOLD}%-$((cols - 32))s  %-10s %-8s %s${RESET}\033[K\n" "Folder" "Last Sync" "Status" "Trigger"
+    local host_col=16
+    printf "  ${BOLD}%-${host_col}s %-$((cols - host_col - 34))s  %-10s %-8s %s${RESET}\033[K\n" "Host" "Folder" "Last Sync" "Status" "Trigger"
 
     if [ -f "$STATUS_FILE" ]; then
-        while IFS='|' read -r folder status ts trigger; do
-            [ -z "$folder" ] && continue
+        while IFS='|' read -r host folder status ts trigger; do
+            [ -z "$host" ] && continue
+            local display_host="${host#*@}"
+            if [ ${#display_host} -gt $((host_col - 1)) ]; then
+                display_host="${display_host:0:$((host_col - 3))}.."
+            fi
             local display_folder="${folder/#$HOME/$home_short}"
-            local max_folder_len=$((cols - 34))
+            local max_folder_len=$((cols - host_col - 36))
             if [ ${#display_folder} -gt $max_folder_len ]; then
                 display_folder="${display_folder:0:$((max_folder_len - 2))}.."
             fi
@@ -148,8 +153,8 @@ draw_dashboard() {
             else
                 status_display="${RED}✗ FAIL${RESET}"
             fi
-            printf "  %-$((cols - 32))s  ${DIM}%-10s${RESET} %b ${DIM}%s${RESET}\033[K\n" \
-                "$display_folder" "$time_part" "$status_display" "$trigger"
+            printf "  %-${host_col}s %-$((cols - host_col - 34))s  ${DIM}%-10s${RESET} %b ${DIM}%s${RESET}\033[K\n" \
+                "$display_host" "$display_folder" "$time_part" "$status_display" "$trigger"
         done < "$STATUS_FILE"
     else
         echo -e "  ${DIM}No sync data yet. Waiting for first sync...${RESET}\033[K"

@@ -12,34 +12,82 @@ Two-way folder sync between local machine and a remote Tailscale host using [Uni
 
 ## Requirements
 
-Install on **both** local and remote machines:
+**Local machine:**
 
 ```bash
+sudo apt install unison inotify-tools
+```
+
+**Remote machines** must have `unison` installed and SSH access configured. See [Remote Host Setup](#remote-host-setup) below.
+
+## Remote Host Setup
+
+### Linux
+
+```bash
+# 1. Install unison
 sudo apt install unison
+
+# 2. Ensure Tailscale is installed and connected
+# https://tailscale.com/download/linux
+
+# 3. Set up SSH key auth (run on LOCAL machine)
+ssh-copy-id user@remote-host
+
+# 4. Test connection
+ssh user@remote-host "unison -version"
 ```
 
-Local machine also needs:
+### WSL (Windows host with WSL)
 
-```bash
-sudo apt install inotify-tools
-```
+On the Windows host:
 
-SSH key auth must be configured between local and remote.
+1. **Enable OpenSSH Server** (PowerShell as Admin):
+   ```powershell
+   Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+   Start-Service sshd
+   Set-Service -Name sshd -StartupType Automatic
+   ```
+
+2. **Install WSL and unison inside it:**
+   ```bash
+   wsl --install  # if not already installed
+   wsl
+   sudo apt install unison
+   ```
+
+3. **Configure SSH to use WSL as default shell** — edit `C:\ProgramData\ssh\sshd_config` on Windows:
+   ```
+   # Add or change this line:
+   Subsystem sftp /usr/lib/openssh/sftp-server
+
+   # Set WSL bash as default shell for your user
+   Match User eso
+       ForceCommand C:\Windows\System32\wsl.exe -e bash -login
+   ```
+   Then restart sshd: `Restart-Service sshd` (PowerShell as Admin).
+
+4. **Set up SSH key auth** (run on LOCAL machine):
+   ```bash
+   ssh-copy-id user@remote-host
+   ```
+
+5. **Test connection:**
+   ```bash
+   ssh user@remote-host "unison -version"
+   ```
+
+> **Note:** Paths in `SYNC_TARGETS` use the WSL filesystem (e.g. `~/dev/autosync` maps to `/home/user/dev/autosync` inside WSL), not Windows paths.
 
 ## Configuration
 
 Edit the top of `autosync-watch.sh`:
 
 ```bash
-# Remote host
-REMOTE_USER="sonic"
-REMOTE_HOST="DXOffice2021"
-
-# Folders to sync (local paths — remote paths mirror these under the remote user's home)
-SYNC_FOLDERS=(
-    "$HOME/dev/autosync"
-    "$HOME/dev/ChatGPT-Next-Web2"
-)
+# Sync targets: user@host -> space-separated folder list
+declare -A SYNC_TARGETS
+SYNC_TARGETS["sonic@DXOffice2021"]="$HOME/dev/autosync $HOME/dev/ChatGPT-Next-Web2"
+SYNC_TARGETS["eso@tuf"]="$HOME/dev/autosync"
 
 # Global exclude patterns (applied to all folders)
 GLOBAL_EXCLUDES=(
@@ -51,6 +99,8 @@ GLOBAL_EXCLUDES=(
 declare -A FOLDER_EXCLUDES
 FOLDER_EXCLUDES["$HOME/dev/ChatGPT-Next-Web2"]=".env.local"
 ```
+
+Each remote host has its own independently defined set of sync folders. Remote paths mirror local paths under the remote user's home directory.
 
 After editing, restart the service:
 

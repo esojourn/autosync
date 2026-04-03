@@ -2,15 +2,10 @@
 # Two-way folder sync via Unison over Tailscale (SSH)
 # Watches for local changes with inotifywait, syncs periodically for remote changes.
 
-REMOTE_USER="sonic"
-REMOTE_HOST="DXOffice2021"
-
-# ── Folders to sync (add more entries as needed) ──
-SYNC_FOLDERS=(
-    "$HOME/dev/autosync"
-    "$HOME/dev/ChatGPT-Next-Web2"
-    "$HOME/dev/sk-add-ip"
-)
+# ── Sync targets: user@host → space-separated folder list ──
+declare -A SYNC_TARGETS
+SYNC_TARGETS["sonic@DXOffice2021"]="$HOME/dev/autosync $HOME/dev/ChatGPT-Next-Web2 $HOME/dev/sk-add-ip"
+SYNC_TARGETS["eso@tuf"]="$HOME/dev/autosync"
 
 # ── Global exclude patterns (applied to all folders) ──
 GLOBAL_EXCLUDES=(
@@ -19,7 +14,7 @@ GLOBAL_EXCLUDES=(
 )
 
 # ── Per-folder exclude patterns (in addition to globals) ──
-# Use the folder path as key (must match SYNC_FOLDERS entries after expansion).
+# Use the folder path as key (must match entries in SYNC_TARGETS after expansion).
 # Separate patterns with spaces.
 declare -A FOLDER_EXCLUDES
 FOLDER_EXCLUDES["$HOME/dev/autosync"]=""
@@ -35,6 +30,25 @@ STATE_FILE="$HOME/.local/share/autosync/state"
 
 mkdir -p "$(dirname "$LOG_FILE")"
 
+# ── Parse user@host target ──
+parse_target() {
+    TARGET_USER="${1%%@*}"
+    TARGET_HOST="${1#*@}"
+}
+
+# ── Build deduplicated folder list across all hosts ──
+declare -A _seen_folders
+ALL_FOLDERS=()
+for _target in "${!SYNC_TARGETS[@]}"; do
+    for _folder in ${SYNC_TARGETS[$_target]}; do
+        if [ -z "${_seen_folders[$_folder]}" ]; then
+            _seen_folders[$_folder]=1
+            ALL_FOLDERS+=("$_folder")
+        fi
+    done
+done
+unset _seen_folders _target _folder
+
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
 }
@@ -44,58 +58,69 @@ set_state() {
 }
 
 update_status() {
-    local folder="$1" status="$2" trigger="$3"
-    local ts
+    local host="$1" folder="$2" status="$3" trigger="$4"
+    local ts key
     ts=$(date '+%Y-%m-%d %H:%M:%S')
-    # Update or add entry for this folder in the status file
-    if [ -f "$STATUS_FILE" ] && grep -q "^${folder}|" "$STATUS_FILE"; then
-        sed -i "s#^${folder}|.*#${folder}|${status}|${ts}|${trigger}#" "$STATUS_FILE"
+    key="${host}|${folder}"
+    if [ -f "$STATUS_FILE" ] && grep -q "^${key}|" "$STATUS_FILE"; then
+        sed -i "s#^${key}|.*#${key}|${status}|${ts}|${trigger}#" "$STATUS_FILE"
     else
-        echo "${folder}|${status}|${ts}|${trigger}" >> "$STATUS_FILE"
+        echo "${key}|${status}|${ts}|${trigger}" >> "$STATUS_FILE"
     fi
 }
 
-# ── Build unison args for each folder ──
+# ── Sync all folders to all hosts ──
 sync_all() {
     local trigger="${1:-periodic}"
     set_state "syncing"
-    for folder in "${SYNC_FOLDERS[@]}"; do
-        local remote_path="${folder/#$HOME/\/home\/$REMOTE_USER}"
-        # Ensure remote directory exists
-        ssh -o ConnectTimeout=10 "$REMOTE_USER@$REMOTE_HOST" "mkdir -p '$remote_path'" 2>/dev/null
-        log "Syncing $folder ↔ $REMOTE_HOST:$remote_path"
-        # Build ignore args from global + per-folder excludes
-        local ignore_args=()
-        for pattern in "${GLOBAL_EXCLUDES[@]}"; do
-            ignore_args+=(-ignore "Name $pattern")
-        done
-        local excludes="${FOLDER_EXCLUDES[$folder]}"
-        for pattern in $excludes; do
-            ignore_args+=(-ignore "Name $pattern")
-        done
-
-        unison "$folder" "ssh://$REMOTE_USER@$REMOTE_HOST/$remote_path" \
-            -auto -batch \
-            -prefer newer \
-            -times \
-            -retry 3 \
-            -sshargs "-o ConnectTimeout=10" \
-            "${ignore_args[@]}" \
-            -logfile "$LOG_FILE" \
-            2>&1 | tee -a "$LOG_FILE"
-        if [ ${PIPESTATUS[0]} -eq 0 ]; then
-            log "Sync OK: $folder"
-            update_status "$folder" "OK" "$trigger"
-        else
-            log "Sync FAILED: $folder"
-            update_status "$folder" "FAILED" "$trigger"
+    for target in "${!SYNC_TARGETS[@]}"; do
+        parse_target "$target"
+        # Check host reachability before syncing its folders
+        if ! ssh -o ConnectTimeout=5 "$target" "true" 2>/dev/null; then
+            log "Host $TARGET_HOST unreachable, skipping"
+            for folder in ${SYNC_TARGETS[$target]}; do
+                update_status "$target" "$folder" "FAILED" "$trigger"
+            done
+            continue
         fi
+        for folder in ${SYNC_TARGETS[$target]}; do
+            local remote_path="${folder/#$HOME/\/home\/$TARGET_USER}"
+            ssh -o ConnectTimeout=10 "$target" "mkdir -p '$remote_path'" 2>/dev/null
+            log "Syncing $folder ↔ $TARGET_HOST:$remote_path"
+            # Build ignore args from global + per-folder excludes
+            local ignore_args=()
+            for pattern in "${GLOBAL_EXCLUDES[@]}"; do
+                ignore_args+=(-ignore "Name $pattern")
+            done
+            local excludes="${FOLDER_EXCLUDES[$folder]}"
+            for pattern in $excludes; do
+                ignore_args+=(-ignore "Name $pattern")
+            done
+
+            unison "$folder" "ssh://$target/$remote_path" \
+                -auto -batch \
+                -prefer newer \
+                -times \
+                -retry 3 \
+                -sshargs "-o ConnectTimeout=10" \
+                "${ignore_args[@]}" \
+                -logfile "$LOG_FILE" \
+                2>&1 | tee -a "$LOG_FILE"
+            if [ ${PIPESTATUS[0]} -eq 0 ]; then
+                log "Sync OK: $folder -> $TARGET_HOST"
+                update_status "$target" "$folder" "OK" "$trigger"
+            else
+                log "Sync FAILED: $folder -> $TARGET_HOST"
+                update_status "$target" "$folder" "FAILED" "$trigger"
+            fi
+        done
     done
     set_state "watching"
 }
 
 # ── Initial sync ──
 log "=== autosync started ==="
+> "$STATUS_FILE"
 sync_all "startup"
 
 # ── Watch for local changes + periodic sync for remote changes ──
@@ -103,7 +128,7 @@ LAST_SYNC=$(date +%s)
 
 # Build inotifywait watch paths
 WATCH_PATHS=()
-for folder in "${SYNC_FOLDERS[@]}"; do
+for folder in "${ALL_FOLDERS[@]}"; do
     WATCH_PATHS+=("$folder")
 done
 
@@ -128,7 +153,7 @@ for pattern in "${GLOBAL_EXCLUDES[@]}" ; do
         INOTIFY_EXCLUDE="${INOTIFY_EXCLUDE}|${local_re}"
     fi
 done
-for folder in "${SYNC_FOLDERS[@]}"; do
+for folder in "${ALL_FOLDERS[@]}"; do
     for pattern in ${FOLDER_EXCLUDES[$folder]}; do
         [ -n "${_seen_patterns[$pattern]}" ] && continue
         _seen_patterns[$pattern]=1
