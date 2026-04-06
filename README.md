@@ -116,6 +116,8 @@ Run the terminal UI to monitor and manage autosync:
 ./autosync-tui.sh
 ```
 
+![AutoSync TUI Screenshot](AutoSync-TUI-Screenshot.png)
+
 ### Dashboard (default view)
 
 - Service status: Running / Stopped / Not Installed
