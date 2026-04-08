@@ -3,9 +3,11 @@
 # Watches for local changes with inotifywait, syncs periodically for remote changes.
 
 # ── Sync targets: user@host → space-separated folder list ──
+# Each entry can be "local_path" or "local_path:remote_path".
+# When remote_path is omitted, it is auto-derived by replacing $HOME with /home/$USER.
 declare -A SYNC_TARGETS
 SYNC_TARGETS["sonic@DXOffice2021"]="$HOME/dev/autosync $HOME/dev/ChatGPT-Next-Web2 $HOME/dev/sk-add-ip"
-SYNC_TARGETS["eso@tuf"]="$HOME/dev/autosync"
+SYNC_TARGETS["eso@tufub"]="$HOME/dev/autosync:/home/eso/dev/autosync $HOME/dev/newapi-log:/home/eso/dev/newapi-log"
 
 # ── Global exclude patterns (applied to all folders) ──
 GLOBAL_EXCLUDES=(
@@ -27,6 +29,7 @@ DEBOUNCE=3                # seconds to wait after last local change before synci
 LOG_FILE="$HOME/.local/share/autosync/autosync.log"
 STATUS_FILE="$HOME/.local/share/autosync/status"
 STATE_FILE="$HOME/.local/share/autosync/state"
+DISABLED_FILE="$HOME/.local/share/autosync/disabled"
 
 mkdir -p "$(dirname "$LOG_FILE")"
 
@@ -36,18 +39,31 @@ parse_target() {
     TARGET_HOST="${1#*@}"
 }
 
-# ── Build deduplicated folder list across all hosts ──
+# ── Parse "local:remote" or just "local" path spec ──
+parse_path_spec() {
+    local spec="$1"
+    if [[ "$spec" == *:* ]]; then
+        LOCAL_PATH="${spec%%:*}"
+        REMOTE_PATH="${spec#*:}"
+    else
+        LOCAL_PATH="$spec"
+        REMOTE_PATH=""
+    fi
+}
+
+# ── Build deduplicated local folder list across all hosts ──
 declare -A _seen_folders
 ALL_FOLDERS=()
 for _target in "${!SYNC_TARGETS[@]}"; do
-    for _folder in ${SYNC_TARGETS[$_target]}; do
-        if [ -z "${_seen_folders[$_folder]}" ]; then
-            _seen_folders[$_folder]=1
-            ALL_FOLDERS+=("$_folder")
+    for _spec in ${SYNC_TARGETS[$_target]}; do
+        parse_path_spec "$_spec"
+        if [ -z "${_seen_folders[$LOCAL_PATH]}" ]; then
+            _seen_folders[$LOCAL_PATH]=1
+            ALL_FOLDERS+=("$LOCAL_PATH")
         fi
     done
 done
-unset _seen_folders _target _folder
+unset _seen_folders _target _spec
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
@@ -69,22 +85,48 @@ update_status() {
     fi
 }
 
+is_host_disabled() {
+    [ -f "$DISABLED_FILE" ] && grep -qxF "$1" "$DISABLED_FILE"
+}
+
+is_folder_disabled() {
+    [ -f "$DISABLED_FILE" ] && grep -qxF "$1|$2" "$DISABLED_FILE"
+}
+
 # ── Sync all folders to all hosts ──
 sync_all() {
     local trigger="${1:-periodic}"
     set_state "syncing"
     for target in "${!SYNC_TARGETS[@]}"; do
         parse_target "$target"
+        # Skip disabled hosts
+        if is_host_disabled "$target"; then
+            log "Host $TARGET_HOST paused, skipping"
+            continue
+        fi
         # Check host reachability before syncing its folders
         if ! ssh -o ConnectTimeout=5 "$target" "true" 2>/dev/null; then
             log "Host $TARGET_HOST unreachable, skipping"
-            for folder in ${SYNC_TARGETS[$target]}; do
-                update_status "$target" "$folder" "FAILED" "$trigger"
+            for _spec in ${SYNC_TARGETS[$target]}; do
+                parse_path_spec "$_spec"
+                update_status "$target" "$LOCAL_PATH" "FAILED" "$trigger"
             done
             continue
         fi
-        for folder in ${SYNC_TARGETS[$target]}; do
-            local remote_path="${folder/#$HOME/\/home\/$TARGET_USER}"
+        for spec in ${SYNC_TARGETS[$target]}; do
+            parse_path_spec "$spec"
+            local folder="$LOCAL_PATH"
+            # Skip disabled folders
+            if is_folder_disabled "$target" "$folder"; then
+                log "Folder $folder on $TARGET_HOST paused, skipping"
+                continue
+            fi
+            local remote_path
+            if [ -n "$REMOTE_PATH" ]; then
+                remote_path="$REMOTE_PATH"
+            else
+                remote_path="${folder/#$HOME/\/home\/$TARGET_USER}"
+            fi
             ssh -o ConnectTimeout=10 "$target" "mkdir -p '$remote_path'" 2>/dev/null
             log "Syncing $folder ↔ $TARGET_HOST:$remote_path"
             # Build ignore args from global + per-folder excludes
@@ -167,6 +209,9 @@ unset _seen_patterns
 log "Watching ${WATCH_PATHS[*]} for changes (poll every ${POLL_INTERVAL}s)"
 [ -n "$INOTIFY_EXCLUDE" ] && log "Excluding pattern: $INOTIFY_EXCLUDE"
 
+MANUAL_SYNC=0
+trap 'MANUAL_SYNC=1' USR1
+
 while true; do
     # Wait for local file change OR timeout for periodic sync
     inotifywait -r -q -t "$POLL_INTERVAL" \
@@ -177,7 +222,12 @@ while true; do
 
     NOW=$(date +%s)
 
-    if [ $EXIT_CODE -eq 0 ]; then
+    if [ $MANUAL_SYNC -eq 1 ]; then
+        MANUAL_SYNC=0
+        log "Manual sync triggered"
+        sync_all "manual"
+        LAST_SYNC=$NOW
+    elif [ $EXIT_CODE -eq 0 ]; then
         # Local change detected — debounce
         log "Change detected, waiting ${DEBOUNCE}s to debounce..."
         sleep "$DEBOUNCE"

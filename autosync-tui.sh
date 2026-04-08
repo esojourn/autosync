@@ -6,6 +6,7 @@ STATUS_DIR="$HOME/.local/share/autosync"
 STATUS_FILE="$STATUS_DIR/status"
 STATE_FILE="$STATUS_DIR/state"
 LOG_FILE="$STATUS_DIR/autosync.log"
+DISABLED_FILE="$STATUS_DIR/disabled"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_FILE="$HOME/.config/systemd/user/autosync.service"
 
@@ -21,12 +22,17 @@ WHITE="\033[37m"
 BG_BLUE="\033[44m"
 REVERSE="\033[7m"
 
-# UI mode: dashboard or log
+# UI mode: dashboard, log, or filter
 MODE="dashboard"
 LOG_OFFSET=0       # scroll offset for log view (lines from bottom)
+FILTER_CURSOR=0    # cursor position in filter view
 CONFIRM_ACTION=""  # pending confirmation action
 MESSAGE=""         # temporary status message
 MESSAGE_TIME=0     # when the message was set
+
+# Filter items: flat list of "host" or "host|folder" entries for cursor navigation
+FILTER_ITEMS=()
+FILTER_TYPES=()    # "host" or "folder" for each item
 
 cleanup() {
     tput cnorm   # show cursor
@@ -41,6 +47,193 @@ tput civis   # hide cursor
 show_message() {
     MESSAGE="$1"
     MESSAGE_TIME=$(date +%s)
+}
+
+is_host_disabled() {
+    [ -f "$DISABLED_FILE" ] && grep -qxF "$1" "$DISABLED_FILE"
+}
+
+is_folder_disabled() {
+    [ -f "$DISABLED_FILE" ] && grep -qxF "$1|$2" "$DISABLED_FILE"
+}
+
+is_item_disabled() {
+    local host="$1" folder="$2"
+    if [ -n "$folder" ]; then
+        is_host_disabled "$host" || is_folder_disabled "$host" "$folder"
+    else
+        is_host_disabled "$host"
+    fi
+}
+
+toggle_host() {
+    local host="$1"
+    if is_host_disabled "$host"; then
+        # Re-enable: remove host line and all its folder lines
+        [ -f "$DISABLED_FILE" ] && grep -vxF "$host" "$DISABLED_FILE" | grep -v "^${host}|" > "$DISABLED_FILE.tmp"
+        mv "$DISABLED_FILE.tmp" "$DISABLED_FILE"
+        show_message "Enabled $host"
+    else
+        # Disable: add host line
+        echo "$host" >> "$DISABLED_FILE"
+        show_message "Paused $host"
+    fi
+}
+
+toggle_folder() {
+    local host="$1" folder="$2"
+    local key="$host|$folder"
+    # If entire host is disabled, can't toggle individual folders
+    if is_host_disabled "$host"; then
+        show_message "Enable the host first"
+        return
+    fi
+    if is_folder_disabled "$host" "$folder"; then
+        [ -f "$DISABLED_FILE" ] && grep -vxF "$key" "$DISABLED_FILE" > "$DISABLED_FILE.tmp"
+        mv "$DISABLED_FILE.tmp" "$DISABLED_FILE"
+        show_message "Enabled ${folder##*/}"
+    else
+        echo "$key" >> "$DISABLED_FILE"
+        show_message "Paused ${folder##*/}"
+    fi
+}
+
+build_filter_items() {
+    FILTER_ITEMS=()
+    FILTER_TYPES=()
+    if [ ! -f "$STATUS_FILE" ]; then
+        return
+    fi
+    local prev_host=""
+    while IFS='|' read -r host folder _rest; do
+        [ -z "$host" ] && continue
+        if [ "$host" != "$prev_host" ]; then
+            FILTER_ITEMS+=("$host")
+            FILTER_TYPES+=("host")
+            prev_host="$host"
+        fi
+        FILTER_ITEMS+=("$host|$folder")
+        FILTER_TYPES+=("folder")
+    done < "$STATUS_FILE"
+}
+
+draw_filter() {
+    local cols rows
+    cols=$(tput cols)
+    rows=$(tput lines)
+    tput cup 0 0
+
+    build_filter_items
+
+    # Header
+    local service_status
+    if ! is_service_installed; then
+        service_status="${DIM}○ Not Installed${RESET}"
+    elif is_service_running; then
+        service_status="${GREEN}${BOLD}● Running${RESET}"
+    else
+        service_status="${RED}${BOLD}● Stopped${RESET}"
+    fi
+
+    echo -e "  ${BOLD}${CYAN}AUTOSYNC FILTER${RESET}$(printf '%*s' $((cols - 38)) '')${service_status}\033[K"
+    echo -e "  ${DIM}$(printf '─%.0s' $(seq 1 $((cols - 4))))${RESET}\033[K"
+    echo -e "  ${DIM}Use ↑/↓ to navigate, SPACE to toggle, Esc to go back${RESET}\033[K"
+    echo -e "\033[K"
+
+    # Clamp cursor
+    local total=${#FILTER_ITEMS[@]}
+    if [ "$total" -eq 0 ]; then
+        echo -e "  ${DIM}No sync data yet. Run a sync first.${RESET}\033[K"
+        echo -ne "\033[J"
+        tput cup $((rows - 2)) 0
+        echo -e "  ${DIM}$(printf '─%.0s' $(seq 1 $((cols - 4))))${RESET}\033[K"
+        tput cup $((rows - 1)) 0
+        echo -ne "  ${REVERSE} Esc ${RESET} Back\033[K"
+        return
+    fi
+    [ "$FILTER_CURSOR" -ge "$total" ] && FILTER_CURSOR=$((total - 1))
+    [ "$FILTER_CURSOR" -lt 0 ] && FILTER_CURSOR=0
+
+    local home_short="~"
+    local i
+    for (( i=0; i<total; i++ )); do
+        local item="${FILTER_ITEMS[$i]}"
+        local type="${FILTER_TYPES[$i]}"
+        local cursor_mark="  "
+        [ "$i" -eq "$FILTER_CURSOR" ] && cursor_mark="${REVERSE}▶${RESET} "
+
+        if [ "$type" = "host" ]; then
+            local host="$item"
+            local display_host="${host#*@}"
+            local status_mark
+            if is_host_disabled "$host"; then
+                status_mark="${RED}✗ paused${RESET}"
+            else
+                status_mark="${GREEN}✓ enabled${RESET}"
+            fi
+            printf "  ${cursor_mark}${BOLD}%-$((cols - 22))s${RESET} [%b]\033[K\n" "$display_host" "$status_mark"
+        else
+            local host="${item%%|*}"
+            local folder="${item#*|}"
+            local display_folder="${folder/#$HOME/$home_short}"
+            local status_mark
+            if is_host_disabled "$host"; then
+                status_mark="${DIM}✗${RESET}"
+            elif is_folder_disabled "$host" "$folder"; then
+                status_mark="${RED}✗${RESET}"
+            else
+                status_mark="${GREEN}✓${RESET}"
+            fi
+            printf "  ${cursor_mark}    %-$((cols - 26))s [%b]\033[K\n" "$display_folder" "$status_mark"
+        fi
+    done
+
+    echo -ne "\033[J"
+
+    # Footer
+    tput cup $((rows - 3)) 0
+    local now
+    now=$(date +%s)
+    if [ -n "$MESSAGE" ] && [ $((now - MESSAGE_TIME)) -lt 5 ]; then
+        echo -e "  ${YELLOW}${MESSAGE}${RESET}\033[K"
+    else
+        echo -e "\033[K"
+    fi
+    tput cup $((rows - 2)) 0
+    echo -e "  ${DIM}$(printf '─%.0s' $(seq 1 $((cols - 4))))${RESET}\033[K"
+    tput cup $((rows - 1)) 0
+    echo -ne "  ${REVERSE} ↑/↓ ${RESET} Navigate  ${REVERSE} ␣ ${RESET} Toggle  ${REVERSE} Esc ${RESET} Back\033[K"
+}
+
+handle_key_filter() {
+    local key="$1"
+    local total=${#FILTER_ITEMS[@]}
+
+    case "$key" in
+        q|Q|$'\e')
+            MODE="dashboard"
+            ;;
+        A)  # Up arrow
+            FILTER_CURSOR=$((FILTER_CURSOR - 1))
+            [ "$FILTER_CURSOR" -lt 0 ] && FILTER_CURSOR=0
+            ;;
+        B)  # Down arrow
+            FILTER_CURSOR=$((FILTER_CURSOR + 1))
+            [ "$FILTER_CURSOR" -ge "$total" ] && FILTER_CURSOR=$((total - 1))
+            ;;
+        " ")
+            [ "$total" -eq 0 ] && return
+            local item="${FILTER_ITEMS[$FILTER_CURSOR]}"
+            local type="${FILTER_TYPES[$FILTER_CURSOR]}"
+            if [ "$type" = "host" ]; then
+                toggle_host "$item"
+            else
+                local host="${item%%|*}"
+                local folder="${item#*|}"
+                toggle_folder "$host" "$folder"
+            fi
+            ;;
+    esac
 }
 
 is_service_installed() {
@@ -99,6 +292,11 @@ do_restart() {
     show_message "Service restarted"
 }
 
+do_manual_sync() {
+    systemctl --user kill --signal=USR1 autosync
+    show_message "Manual sync triggered"
+}
+
 draw_dashboard() {
     local cols rows
     cols=$(tput cols)
@@ -148,10 +346,12 @@ draw_dashboard() {
             fi
             local time_part="${ts##* }"
             local status_display
-            if [ "$status" = "OK" ]; then
-                status_display="${GREEN}✓ OK${RESET}  "
+            if is_host_disabled "$host" || is_folder_disabled "$host" "$folder"; then
+                status_display="${DIM}⏸ paused${RESET}"
+            elif [ "$status" = "OK" ]; then
+                status_display="${GREEN}✓ OK${RESET}    "
             else
-                status_display="${RED}✗ FAIL${RESET}"
+                status_display="${RED}✗ FAIL${RESET}  "
             fi
             printf "  %-${host_col}s %-$((cols - host_col - 34))s  ${DIM}%-10s${RESET} %b ${DIM}%s${RESET}\033[K\n" \
                 "$display_host" "$display_folder" "$time_part" "$status_display" "$trigger"
@@ -297,14 +497,14 @@ draw_footer() {
     local keys=""
     if is_service_installed; then
         if is_service_running; then
-            keys="${REVERSE} s ${RESET} Stop  ${REVERSE} r ${RESET} Restart  ${REVERSE} u ${RESET} Uninstall"
+            keys="${REVERSE} ␣ ${RESET} Sync  ${REVERSE} s ${RESET} Stop  ${REVERSE} r ${RESET} Restart  ${REVERSE} u ${RESET} Uninstall"
         else
             keys="${REVERSE} s ${RESET} Start  ${REVERSE} u ${RESET} Uninstall"
         fi
     else
         keys="${REVERSE} i ${RESET} Install"
     fi
-    echo -ne "  ${keys}  ${REVERSE} l ${RESET} Logs  ${REVERSE} q ${RESET} Quit\033[K"
+    echo -ne "  ${keys}  ${REVERSE} f ${RESET} Filter  ${REVERSE} l ${RESET} Logs  ${REVERSE} q ${RESET} Quit\033[K"
 }
 
 handle_key_dashboard() {
@@ -356,6 +556,18 @@ handle_key_dashboard() {
             else
                 show_message "Service not running"
             fi
+            ;;
+        " ")
+            if is_service_running; then
+                do_manual_sync
+            else
+                show_message "Service not running"
+            fi
+            ;;
+        f|F)
+            MODE="filter"
+            FILTER_CURSOR=0
+            build_filter_items
             ;;
         l|L)
             MODE="log"
@@ -415,12 +627,14 @@ handle_key_log() {
 while true; do
     if [ "$MODE" = "log" ]; then
         draw_log
+    elif [ "$MODE" = "filter" ]; then
+        draw_filter
     else
         draw_dashboard
     fi
 
-    # Wait for input with 2s timeout
-    read -rsn1 -t 2 key
+    # Wait for input with 2s timeout (IFS= preserves space character)
+    IFS= read -rsn1 -t 2 key
     if [ -z "$key" ]; then
         continue
     fi
@@ -433,7 +647,7 @@ while true; do
             key="$seq2"  # A=up, B=down
         else
             # Plain Escape
-            if [ "$MODE" = "log" ]; then
+            if [ "$MODE" = "log" ] || [ "$MODE" = "filter" ]; then
                 MODE="dashboard"
             fi
             continue
@@ -442,6 +656,8 @@ while true; do
 
     if [ "$MODE" = "log" ]; then
         handle_key_log "$key"
+    elif [ "$MODE" = "filter" ]; then
+        handle_key_filter "$key"
     else
         handle_key_dashboard "$key"
     fi
