@@ -85,9 +85,10 @@ Edit the top of `autosync-watch.sh`:
 
 ```bash
 # Sync targets: user@host -> space-separated folder list
+# Each entry can be "local_path" or "local_path:remote_path"
 declare -A SYNC_TARGETS
 SYNC_TARGETS["sonic@DXOffice2021"]="$HOME/dev/autosync $HOME/dev/ChatGPT-Next-Web2"
-SYNC_TARGETS["eso@tuf"]="$HOME/dev/autosync"
+SYNC_TARGETS["eso@tufub"]="$HOME/dev/autosync:/home/eso/dev/autosync"
 
 # Global exclude patterns (applied to all folders)
 GLOBAL_EXCLUDES=(
@@ -100,7 +101,7 @@ declare -A FOLDER_EXCLUDES
 FOLDER_EXCLUDES["$HOME/dev/ChatGPT-Next-Web2"]=".env.local"
 ```
 
-Each remote host has its own independently defined set of sync folders. Remote paths mirror local paths under the remote user's home directory.
+Each remote host has its own independently defined set of sync folders. When `remote_path` is omitted, it mirrors the local path under the remote user's home directory. Use `local_path:remote_path` to specify a different remote path.
 
 After editing, restart the service:
 
@@ -128,12 +129,29 @@ Run the terminal UI to monitor and manage autosync:
 
 | Key | Action |
 |-----|--------|
+| `Space` | Trigger manual sync |
 | `i` | Install service (only when not installed) |
 | `u` | Uninstall service (with confirmation) |
 | `s` | Start or Stop service (stop requires confirmation) |
 | `r` | Restart service |
+| `f` | Open filter view (pause/unpause hosts and folders) |
 | `l` | Open log viewer |
 | `q` | Quit |
+
+### Filter view
+
+Press `f` to open the filter view. This lets you pause and unpause individual sync hosts or specific folders within a host.
+
+- **Pause a host** — skips all sync to that host (useful when the machine is offline to avoid repeated timeouts)
+- **Pause a folder** — skips sync for that specific folder on a host (useful for folders that rarely change)
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` | Navigate hosts and folders |
+| `Space` | Toggle pause/unpause |
+| `Esc` | Back to dashboard |
+
+Paused state is persisted in `~/.local/share/autosync/disabled` and takes effect immediately — the sync daemon reads this file before each sync cycle.
 
 ### Log viewer
 
@@ -176,3 +194,4 @@ tail -f ~/.local/share/autosync/autosync.log
 | Log file | `~/.local/share/autosync/autosync.log` |
 | Status file | `~/.local/share/autosync/status` |
 | State file | `~/.local/share/autosync/state` |
+| Disabled list | `~/.local/share/autosync/disabled` |
