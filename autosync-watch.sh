@@ -6,13 +6,18 @@
 # Each entry can be "local_path" or "local_path:remote_path".
 # When remote_path is omitted, it is auto-derived by replacing $HOME with /home/$USER.
 declare -A SYNC_TARGETS
-SYNC_TARGETS["sonic@DXOffice2021"]="$HOME/dev/autosync $HOME/dev/ChatGPT-Next-Web2 $HOME/dev/sk-add-ip"
-SYNC_TARGETS["eso@tufub"]="$HOME/dev/autosync:/home/eso/dev/autosync $HOME/dev/newapi-log:/home/eso/dev/newapi-log"
+SYNC_TARGETS["sonic@officeub"]="$HOME/dev/autosync $HOME/dev/ChatGPT-Next-Web2 $HOME/dev/sk-add-ip $HOME/dev/llm-test $HOME/dev/newapi-log $HOME/dev/SeerBench-LLM-Review $HOME/dev/goofish-agent $HOME/dev/hermes-web"
+SYNC_TARGETS["eso@tufub"]="$HOME/dev/hermes-web:/home/eso/dev/hermes-web $HOME/dev/goofish-agent:/home/eso/dev/goofish-agent $HOME/dev/ChatGPT-Next-Web2:/home/eso/dev/ChatGPT-Next-Web2 $HOME/dev/autosync:/home/eso/dev/autosync $HOME/dev/newapi-log:/home/eso/newapi-log $HOME/dev/llm-test:/home/eso/dev/llm-test $HOME/dev/SeerBench-LLM-Review:/home/eso/dev/SeerBench-LLM-Review"
+SYNC_TARGETS["root@ali-hk-gpt"]="$HOME/dev/hermes-web/logs-remote:/var/www/html/hermes-multiuser-web-service/logs"
+
+# ── Per-host SSH ports (default 22 when unset) ──
+declare -A HOST_PORTS
+HOST_PORTS["root@ali-hk-gpt"]=11756
 
 # ── Global exclude patterns (applied to all folders) ──
 GLOBAL_EXCLUDES=(
     .git node_modules .next __pycache__ .venv venv
-    .env .cache .tox "*.pyc" .DS_Store .yarn
+    .env .cache .tox "*.pyc" .DS_Store .yarn .spec-workflow
 )
 
 # ── Per-folder exclude patterns (in addition to globals) ──
@@ -20,6 +25,7 @@ GLOBAL_EXCLUDES=(
 # Separate patterns with spaces.
 declare -A FOLDER_EXCLUDES
 FOLDER_EXCLUDES["$HOME/dev/autosync"]=""
+FOLDER_EXCLUDES["$HOME/dev/hermes-web"]="logs-remote"
 FOLDER_EXCLUDES["$HOME/dev/ChatGPT-Next-Web2"]=".env.local"
 FOLDER_EXCLUDES["$HOME/dev/sk-add-ip"]=""
 
@@ -99,13 +105,18 @@ sync_all() {
     set_state "syncing"
     for target in "${!SYNC_TARGETS[@]}"; do
         parse_target "$target"
+        local port="${HOST_PORTS[$target]:-22}"
         # Skip disabled hosts
         if is_host_disabled "$target"; then
             log "Host $TARGET_HOST paused, skipping"
+            for _spec in ${SYNC_TARGETS[$target]}; do
+                parse_path_spec "$_spec"
+                update_status "$target" "$LOCAL_PATH" "PAUSED" "$trigger"
+            done
             continue
         fi
         # Check host reachability before syncing its folders
-        if ! ssh -o ConnectTimeout=5 "$target" "true" 2>/dev/null; then
+        if ! ssh -o ConnectTimeout=5 -p "$port" "$target" "true" 2>/dev/null; then
             log "Host $TARGET_HOST unreachable, skipping"
             for _spec in ${SYNC_TARGETS[$target]}; do
                 parse_path_spec "$_spec"
@@ -119,6 +130,7 @@ sync_all() {
             # Skip disabled folders
             if is_folder_disabled "$target" "$folder"; then
                 log "Folder $folder on $TARGET_HOST paused, skipping"
+                update_status "$target" "$folder" "PAUSED" "$trigger"
                 continue
             fi
             local remote_path
@@ -127,7 +139,7 @@ sync_all() {
             else
                 remote_path="${folder/#$HOME/\/home\/$TARGET_USER}"
             fi
-            ssh -o ConnectTimeout=10 "$target" "mkdir -p '$remote_path'" 2>/dev/null
+            ssh -o ConnectTimeout=10 -p "$port" "$target" "mkdir -p '$remote_path'" 2>/dev/null
             log "Syncing $folder ↔ $TARGET_HOST:$remote_path"
             # Build ignore args from global + per-folder excludes
             local ignore_args=()
@@ -144,7 +156,7 @@ sync_all() {
                 -prefer newer \
                 -times \
                 -retry 3 \
-                -sshargs "-o ConnectTimeout=10" \
+                -sshargs "-o ConnectTimeout=10 -p $port" \
                 "${ignore_args[@]}" \
                 -logfile "$LOG_FILE" \
                 2>&1 | tee -a "$LOG_FILE"
@@ -163,6 +175,15 @@ sync_all() {
 # ── Initial sync ──
 log "=== autosync started ==="
 > "$STATUS_FILE"
+
+# Pre-populate status so TUI shows all configured paths immediately
+for target in "${!SYNC_TARGETS[@]}"; do
+    for spec in ${SYNC_TARGETS[$target]}; do
+        parse_path_spec "$spec"
+        update_status "$target" "$LOCAL_PATH" "PENDING" "startup"
+    done
+done
+
 sync_all "startup"
 
 # ── Watch for local changes + periodic sync for remote changes ──

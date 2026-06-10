@@ -69,10 +69,15 @@ is_item_disabled() {
 toggle_host() {
     local host="$1"
     if is_host_disabled "$host"; then
-        # Re-enable: remove host line and all its folder lines
+        # Re-enable host, but keep every folder paused — folders opt in individually
         [ -f "$DISABLED_FILE" ] && grep -vxF "$host" "$DISABLED_FILE" | grep -v "^${host}|" > "$DISABLED_FILE.tmp"
         mv "$DISABLED_FILE.tmp" "$DISABLED_FILE"
-        show_message "Enabled $host"
+        if [ -f "$STATUS_FILE" ]; then
+            while IFS='|' read -r h folder _rest; do
+                [ "$h" = "$host" ] && echo "$host|$folder" >> "$DISABLED_FILE"
+            done < "$STATUS_FILE"
+        fi
+        show_message "Enabled $host — all folders paused, toggle each to sync"
     else
         # Disable: add host line
         echo "$host" >> "$DISABLED_FILE"
@@ -350,6 +355,8 @@ draw_dashboard() {
                 status_display="${DIM}⏸ paused${RESET}"
             elif [ "$status" = "OK" ]; then
                 status_display="${GREEN}✓ OK${RESET}    "
+            elif [ "$status" = "PENDING" ]; then
+                status_display="${YELLOW}⏳ …${RESET}     "
             else
                 status_display="${RED}✗ FAIL${RESET}  "
             fi

@@ -145,6 +145,8 @@ Press `f` to open the filter view. This lets you pause and unpause individual sy
 - **Pause a host** — skips all sync to that host (useful when the machine is offline to avoid repeated timeouts)
 - **Pause a folder** — skips sync for that specific folder on a host (useful for folders that rarely change)
 
+Unpausing a host does **not** resume its folders: they all stay paused, and you enable each one individually. This prevents accidentally re-syncing every folder when you only want one.
+
 | Key | Action |
 |-----|--------|
 | `↑` / `↓` | Navigate hosts and folders |
