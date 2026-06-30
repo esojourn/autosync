@@ -66,12 +66,28 @@ is_item_disabled() {
     fi
 }
 
+remove_disabled_entries() {
+    local host="$1" folder="${2:-}" tmp
+    mkdir -p "$STATUS_DIR"
+    tmp="${DISABLED_FILE}.$$"
+    if [ -n "$folder" ]; then
+        awk -v host="$host" -v folder="$folder" '
+            BEGIN { FS = "|" }
+            !($1 == host && $2 == folder)
+        ' "$DISABLED_FILE" > "$tmp" && mv "$tmp" "$DISABLED_FILE"
+    else
+        awk -v host="$host" '
+            BEGIN { FS = "|" }
+            $1 != host
+        ' "$DISABLED_FILE" > "$tmp" && mv "$tmp" "$DISABLED_FILE"
+    fi
+}
+
 toggle_host() {
     local host="$1"
     if is_host_disabled "$host"; then
         # Re-enable host, but keep every folder paused — folders opt in individually
-        [ -f "$DISABLED_FILE" ] && grep -vxF "$host" "$DISABLED_FILE" | grep -v "^${host}|" > "$DISABLED_FILE.tmp"
-        mv "$DISABLED_FILE.tmp" "$DISABLED_FILE"
+        [ -f "$DISABLED_FILE" ] && remove_disabled_entries "$host"
         if [ -f "$STATUS_FILE" ]; then
             while IFS='|' read -r h folder _rest; do
                 [ "$h" = "$host" ] && echo "$host|$folder" >> "$DISABLED_FILE"
@@ -80,6 +96,7 @@ toggle_host() {
         show_message "Enabled $host — all folders paused, toggle each to sync"
     else
         # Disable: add host line
+        mkdir -p "$STATUS_DIR"
         echo "$host" >> "$DISABLED_FILE"
         show_message "Paused $host"
     fi
@@ -94,10 +111,10 @@ toggle_folder() {
         return
     fi
     if is_folder_disabled "$host" "$folder"; then
-        [ -f "$DISABLED_FILE" ] && grep -vxF "$key" "$DISABLED_FILE" > "$DISABLED_FILE.tmp"
-        mv "$DISABLED_FILE.tmp" "$DISABLED_FILE"
+        [ -f "$DISABLED_FILE" ] && remove_disabled_entries "$host" "$folder"
         show_message "Enabled ${folder##*/}"
     else
+        mkdir -p "$STATUS_DIR"
         echo "$key" >> "$DISABLED_FILE"
         show_message "Paused ${folder##*/}"
     fi
@@ -269,37 +286,53 @@ RestartSec=10
 [Install]
 WantedBy=default.target
 EOF
-    systemctl --user daemon-reload
-    systemctl --user enable autosync
-    show_message "Service installed and enabled"
+    if systemctl --user daemon-reload && systemctl --user enable autosync; then
+        show_message "Service installed and enabled"
+    else
+        show_message "Install failed"
+    fi
 }
 
 do_uninstall() {
     systemctl --user stop autosync 2>/dev/null
     systemctl --user disable autosync 2>/dev/null
-    rm -f "$SERVICE_FILE"
-    systemctl --user daemon-reload
-    show_message "Service uninstalled"
+    if rm -f "$SERVICE_FILE" && systemctl --user daemon-reload; then
+        show_message "Service uninstalled"
+    else
+        show_message "Uninstall failed"
+    fi
 }
 
 do_start() {
-    systemctl --user start autosync
-    show_message "Service started"
+    if systemctl --user start autosync; then
+        show_message "Service started"
+    else
+        show_message "Start failed"
+    fi
 }
 
 do_stop() {
-    systemctl --user stop autosync
-    show_message "Service stopped"
+    if systemctl --user stop autosync; then
+        show_message "Service stopped"
+    else
+        show_message "Stop failed"
+    fi
 }
 
 do_restart() {
-    systemctl --user restart autosync
-    show_message "Service restarted"
+    if systemctl --user restart autosync; then
+        show_message "Service restarted"
+    else
+        show_message "Restart failed"
+    fi
 }
 
 do_manual_sync() {
-    systemctl --user kill --signal=USR1 autosync
-    show_message "Manual sync triggered"
+    if systemctl --user kill --signal=USR1 autosync; then
+        show_message "Manual sync triggered"
+    else
+        show_message "Manual sync failed"
+    fi
 }
 
 draw_dashboard() {

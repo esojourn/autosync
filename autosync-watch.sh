@@ -81,13 +81,26 @@ set_state() {
 
 update_status() {
     local host="$1" folder="$2" status="$3" trigger="$4"
-    local ts key
+    local ts tmp
     ts=$(date '+%Y-%m-%d %H:%M:%S')
-    key="${host}|${folder}"
-    if [ -f "$STATUS_FILE" ] && grep -q "^${key}|" "$STATUS_FILE"; then
-        sed -i "s#^${key}|.*#${key}|${status}|${ts}|${trigger}#" "$STATUS_FILE"
+    tmp="${STATUS_FILE}.$$"
+    if [ -f "$STATUS_FILE" ]; then
+        awk -v host="$host" -v folder="$folder" -v status="$status" -v ts="$ts" -v trigger="$trigger" '
+            BEGIN { FS = OFS = "|" }
+            $1 == host && $2 == folder {
+                print host, folder, status, ts, trigger
+                updated = 1
+                next
+            }
+            { print }
+            END {
+                if (!updated) {
+                    print host, folder, status, ts, trigger
+                }
+            }
+        ' "$STATUS_FILE" > "$tmp" && mv "$tmp" "$STATUS_FILE"
     else
-        echo "${key}|${status}|${ts}|${trigger}" >> "$STATUS_FILE"
+        echo "${host}|${folder}|${status}|${ts}|${trigger}" >> "$STATUS_FILE"
     fi
 }
 
@@ -133,13 +146,14 @@ sync_all() {
                 update_status "$target" "$folder" "PAUSED" "$trigger"
                 continue
             fi
-            local remote_path
+            local remote_path remote_path_q
             if [ -n "$REMOTE_PATH" ]; then
                 remote_path="$REMOTE_PATH"
             else
                 remote_path="${folder/#$HOME/\/home\/$TARGET_USER}"
             fi
-            ssh -o ConnectTimeout=10 -p "$port" "$target" "mkdir -p '$remote_path'" 2>/dev/null
+            printf -v remote_path_q '%q' "$remote_path"
+            ssh -o ConnectTimeout=10 -p "$port" "$target" "mkdir -p -- $remote_path_q" 2>/dev/null
             log "Syncing $folder ↔ $TARGET_HOST:$remote_path"
             # Build ignore args from global + per-folder excludes
             local ignore_args=()

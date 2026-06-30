@@ -1,0 +1,7 @@
+.spec-workflow/
+
+# Local sync test artifacts / stray files
+test
+test.txt
+tmp/
+id_ed25519.pub
