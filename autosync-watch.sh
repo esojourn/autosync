@@ -165,16 +165,40 @@ sync_all() {
                 ignore_args+=(-ignore "Name $pattern")
             done
 
-            unison "$folder" "ssh://$target/$remote_path" \
-                -auto -batch \
-                -prefer newer \
-                -times \
-                -retry 3 \
-                -sshargs "-o ConnectTimeout=10 -p $port" \
-                "${ignore_args[@]}" \
-                -logfile "$LOG_FILE" \
-                2>&1 | tee -a "$LOG_FILE"
-            if [ ${PIPESTATUS[0]} -eq 0 ]; then
+            # Shared unison flags for the initial run and the self-heal retry
+            local unison_base=(
+                -auto -batch
+                -prefer newer
+                -times
+                -retry 3
+                -sshargs "-o ConnectTimeout=10 -p $port"
+                "${ignore_args[@]}"
+                -logfile "$LOG_FILE"
+            )
+            local ssh_root="ssh://$target/$remote_path"
+            local sync_out rc
+            sync_out=$(mktemp)
+
+            unison "$folder" "$ssh_root" "${unison_base[@]}" 2>&1 \
+                | tee -a "$LOG_FILE" > "$sync_out"
+            rc=${PIPESTATUS[0]}
+
+            # Self-heal corrupt/truncated unison archives. An interrupted write
+            # can leave ~/.unison/arXXXX empty, after which every sync of this
+            # pair dies with "End_of_file ... loading archive". On that specific
+            # signature, rebuild both archives once via -ignorearchives (full
+            # scan, then fresh archives written) and retry before giving up.
+            if [ "$rc" -ne 0 ] && grep -qiE 'loading archive|archive is (corrupt|bogus)|inconsistent archive' "$sync_out"; then
+                log "Corrupt unison archive for $folder ↔ $TARGET_HOST; rebuilding with -ignorearchives"
+                update_status "$target" "$folder" "PENDING" "$trigger"
+                unison "$folder" "$ssh_root" "${unison_base[@]}" -ignorearchives 2>&1 \
+                    | tee -a "$LOG_FILE" > "$sync_out"
+                rc=${PIPESTATUS[0]}
+                [ "$rc" -eq 0 ] && log "Archive rebuilt: $folder ↔ $TARGET_HOST"
+            fi
+            rm -f "$sync_out"
+
+            if [ "$rc" -eq 0 ]; then
                 log "Sync OK: $folder -> $TARGET_HOST"
                 update_status "$target" "$folder" "OK" "$trigger"
             else
